@@ -1,2 +1,6 @@
 .venv/
 data/
+.env
+*.png
+*.jsonl
+*.parquet

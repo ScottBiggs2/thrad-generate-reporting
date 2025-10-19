@@ -16,7 +16,7 @@ if not OPENAI_API_KEY:
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-def load_parquet(parquet_file_path: str = 'parquet_eval_routine/data/2025-10-16.parquet') -> pd.DataFrame:
+def load_parquet(parquet_file_path: str = 'data/2025-10-16.parquet') -> pd.DataFrame:
     df = pd.read_parquet(parquet_file_path, engine='pyarrow')
     print(f"Parquet file successfully read from {parquet_file_path}")
     return df.drop_duplicates(subset=['user'], keep='last')
