@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import argparse
 import pandas as pd
 import requests
 from dotenv import load_dotenv
@@ -16,7 +17,7 @@ if not OPENAI_API_KEY:
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-def load_parquet(parquet_file_path: str = 'data/2025-10-16.parquet') -> pd.DataFrame:
+def load_parquet(parquet_file_path: str) -> pd.DataFrame:
     df = pd.read_parquet(parquet_file_path, engine='pyarrow')
     print(f"Parquet file successfully read from {parquet_file_path}")
     return df.drop_duplicates(subset=['user'], keep='last')
@@ -59,6 +60,24 @@ def sample_rows(df: pd.DataFrame, k_percent: float, seed: int = 42) -> pd.DataFr
     n = max(1, int(len(df) * (k_percent / 100.0)))
     return df.sample(n=n, random_state=seed).reset_index(drop=True)
 
+def repair_json(json_str: str) -> dict:
+    # Find the start and end of the JSON object
+    start_brace = json_str.find('{')
+    end_brace = json_str.rfind('}')
+    
+    if start_brace == -1 or end_brace == -1:
+        raise ValueError("Could not find JSON object in the string.")
+        
+    # Extract the JSON part
+    json_part = json_str[start_brace:end_brace+1]
+    
+    # Attempt to parse the extracted part
+    try:
+        return json.loads(json_part)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Failed to parse even the extracted JSON part: {e}")
+
+
 def evaluate_single_ad(row: pd.Series, rubric: str, idx: int) -> dict:
     """Evaluate a single ad using OpenAI API"""
     prompt = build_prompt(row, rubric)
@@ -72,19 +91,10 @@ def evaluate_single_ad(row: pd.Series, rubric: str, idx: int) -> dict:
             temperature=0.0,
             max_tokens=1000
         )
-
-        # response = client.chat.completions.create(
-        #     model="gpt-5",
-        #     messages=[
-        #         {"role": "user", "content": prompt}
-        #     ],
-        #     max_completion_tokens=1000
-        # )
         
         content = response.choices[0].message.content.strip()
         print(f"Raw response for row {idx}: {content[:200]}...")
         
-        # Check if content is empty
         if not content:
             return {
                 "custom_id": f"row_{idx}",
@@ -93,9 +103,8 @@ def evaluate_single_ad(row: pd.Series, rubric: str, idx: int) -> dict:
                 "error": "Empty response from API"
             }
         
-        # Parse JSON response
         try:
-            # Clean the content - remove any markdown formatting or extra text
+            # Clean the content
             content_clean = content.strip()
             if content_clean.startswith('```json'):
                 content_clean = content_clean[7:]
@@ -104,39 +113,42 @@ def evaluate_single_ad(row: pd.Series, rubric: str, idx: int) -> dict:
             content_clean = content_clean.strip()
             
             result = json.loads(content_clean)
-            # Validate that we have the expected structure
-            if not isinstance(result, dict) or 'overall_score' not in result:
+
+        except json.JSONDecodeError:
+            try:
+                result = repair_json(content)
+            except ValueError as repair_error:
                 return {
                     "custom_id": f"row_{idx}",
                     "status": "failed",
                     "response": None,
-                    "error": f"Invalid JSON structure: missing required fields. Got: {list(result.keys()) if isinstance(result, dict) else type(result)}"
+                    "error": f"JSON repair failed: {repair_error}"
                 }
-            
-            return {
-                "custom_id": f"row_{idx}",
-                "status": "completed",
-                "response": {
-                    "status_code": 200,
-                    "body": {
-                        "choices": [{
-                            "message": {
-                                "content": content
-                            }
-                        }]
-                    }
-                },
-                "error": None
-            }
-        except json.JSONDecodeError as e:
-            print(f"JSON parse error for row {idx}: {str(e)}")
-            print(f"Content that failed to parse: {content}")
+
+        # Validate that we have the expected structure
+        if not isinstance(result, dict) or 'overall_score' not in result:
             return {
                 "custom_id": f"row_{idx}",
                 "status": "failed",
                 "response": None,
-                "error": f"JSON parse error: {str(e)}"
+                "error": f"Invalid JSON structure: missing required fields. Got: {list(result.keys()) if isinstance(result, dict) else type(result)}"
             }
+        
+        return {
+            "custom_id": f"row_{idx}",
+            "status": "completed",
+            "response": {
+                "status_code": 200,
+                "body": {
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps(result)  # Store the cleaned and valid JSON
+                        }
+                    }]
+                }
+            },
+            "error": None
+        }
             
     except Exception as e:
         print(f"API error for row {idx}: {str(e)}")
@@ -217,7 +229,12 @@ def merge_results(sampled_df: pd.DataFrame, result_jsonl_path: str) -> pd.DataFr
     return sampled_df
 
 def main():
-    df = load_parquet()
+    parser = argparse.ArgumentParser(description='Evaluate ads in a Parquet file.')
+    parser.add_argument('parquet_file_path', type=str, help='Path to the Parquet file to be processed.')
+    parser.add_argument('--k', type=float, default=1.0, help='Percentage of the total parquet file to sample.')
+    args = parser.parse_args()
+
+    df = load_parquet(args.parquet_file_path)
     print(f"Loaded dataframe with {len(df)} unique users.")
     
     rubric = (
@@ -231,8 +248,7 @@ def main():
         # "7. Private Activities: Based on the context and user history, are they likely to be participating in romantic, therapeutic, fantastical, or sexual roleplay, writing, or reflection?"
 
 
-    k = 1  # percentage to sample
-    sampled_df = sample_rows(df, k)
+    sampled_df = sample_rows(df, args.k)
     
     # Evaluate ads using OpenAI API
     result_jsonl_path = "openai_batch_results.jsonl"
