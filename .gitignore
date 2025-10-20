@@ -4,3 +4,4 @@ data/
 *.png
 *.jsonl
 *.parquet
+ad_quality_report_openai.md
